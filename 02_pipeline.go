@@ -1,5 +1,9 @@
 package concurrency
 
+import (
+	"fmt"
+)
+
 // =============================================================================
 // EXERCISE 1.2: Pipelines with Directional Channels
 // =============================================================================
@@ -34,8 +38,14 @@ package concurrency
 //
 // QUESTION: Why do we return <-chan int instead of chan int?
 func Generate(start, end int) <-chan int {
-	// YOUR CODE HERE
-	return nil
+	out := make(chan int)
+	go func() {
+		for val := range end - start {
+			out <- start + val
+		}
+		close(out)
+	}()
+	return out
 }
 
 // Square receives integers, squares them, and sends results.
@@ -52,8 +62,14 @@ func Generate(start, end int) <-chan int {
 //
 // QUESTION: What happens if you forget to close the output channel?
 func Square(in <-chan int) <-chan int {
-	// YOUR CODE HERE
-	return nil
+	out := make(chan int)
+	go func() {
+		for val := range in {
+			out <- val * val
+		}
+		close(out)
+	}()
+	return out
 }
 
 // Sum receives integers and returns their sum.
@@ -66,8 +82,11 @@ func Square(in <-chan int) <-chan int {
 //
 // NOTE: This function blocks until the channel is closed!
 func Sum(in <-chan int) int {
-	// YOUR CODE HERE
-	return 0
+	var sum int
+	for val := range in {
+		sum += val
+	}
+	return sum
 }
 
 // RunPipeline connects the stages: Generate -> Square -> Sum
@@ -75,8 +94,9 @@ func Sum(in <-chan int) int {
 // TODO: Wire up the pipeline and return the sum of squares from start to end
 // Example: RunPipeline(1, 4) should compute 1^2 + 2^2 + 3^2 = 1 + 4 + 9 = 14
 func RunPipeline(start, end int) int {
-	// YOUR CODE HERE
-	return 0
+	gen := Generate(start, end)
+	sq := Square(gen)
+	return Sum(sq)
 }
 
 // =============================================================================
@@ -90,8 +110,16 @@ func RunPipeline(start, end int) int {
 // 2. Launches a goroutine that only forwards values where pred(v) is true
 // 3. Closes output when input is exhausted
 func Filter(in <-chan int, pred func(int) bool) <-chan int {
-	// YOUR CODE HERE
-	return nil
+	out := make(chan int)
+	go func() {
+		for val := range in {
+			if pred(val) {
+				out <- val
+			}
+		}
+		close(out)
+	}()
+	return out
 }
 
 // Map applies a function to each value.
@@ -101,8 +129,14 @@ func Filter(in <-chan int, pred func(int) bool) <-chan int {
 // 2. Launches a goroutine that sends fn(v) for each v
 // 3. Closes output when input is exhausted
 func Map(in <-chan int, fn func(int) int) <-chan int {
-	// YOUR CODE HERE
-	return nil
+	out := make(chan int)
+	go func() {
+		for val := range in {
+			out <- fn(val)
+		}
+		close(out)
+	}()
+	return out
 }
 
 // RunFilterMapPipeline demonstrates chaining multiple transforms.
@@ -115,8 +149,14 @@ func Map(in <-chan int, fn func(int) int) <-chan int {
 //
 // Expected: 2^2 + 4^2 + 6^2 + 8^2 = 4 + 16 + 36 + 64 = 120
 func RunFilterMapPipeline() int {
-	// YOUR CODE HERE
-	return 0
+	gen := Generate(1, 10)
+	filt := Filter(gen, func(in int) bool {
+		return in%2 == 0
+	})
+	mapped := Map(filt, func(in int) int {
+		return in * in
+	})
+	return Sum(mapped)
 }
 
 // =============================================================================
@@ -139,8 +179,22 @@ type Result struct {
 //
 // 3. Close the channel when done
 func GenerateWithError(start, end, errEvery int) <-chan Result {
-	// YOUR CODE HERE
-	return nil
+	out := make(chan Result)
+	go func() {
+		defer close(out)
+		for val := start; val < end; val++ {
+			if val%errEvery == 0 {
+				out <- Result{
+					Err: fmt.Errorf("%d is divisible by %d", val, errEvery),
+				}
+				continue
+			}
+			out <- Result{
+				Value: val,
+			}
+		}
+	}()
+	return out
 }
 
 // ProcessResults demonstrates handling errors in a pipeline.
@@ -151,8 +205,14 @@ func GenerateWithError(start, end, errEvery int) <-chan Result {
 // 3. Sum the successful values
 // 4. Return (sum, errorCount)
 func ProcessResults(in <-chan Result) (sum int, errorCount int) {
-	// YOUR CODE HERE
-	return 0, 0
+	for res := range in {
+		if res.Err != nil {
+			errorCount++
+			continue
+		}
+		sum += res.Value
+	}
+	return sum, errorCount
 }
 
 // =============================================================================
@@ -172,8 +232,18 @@ func ProcessResults(in <-chan Result) (sum int, errorCount int) {
 //
 // HINT: This is a preview of context.Context cancellation patterns!
 func GenerateCancellable(start, end int, done <-chan struct{}) <-chan int {
-	// YOUR CODE HERE
-	return nil
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for val := start; val < end; val++ {
+			select {
+			case out <- val:
+			case <-done:
+				return
+			}
+		}
+	}()
+	return out
 }
 
 // TransformCancellable applies a transform but respects cancellation.

@@ -31,14 +31,17 @@ import (
 //
 // QUESTION: Where does the goroutine block? Before or after the sleep?
 func UnbufferedDemo() int {
-	// YOUR CODE HERE
-	return 0
+	buff := make(chan int)
+	go func() {
+		buff <- 42
+	}()
+	time.Sleep(time.Millisecond * 100)
+	return <-buff
 }
 
 // BufferedDemo demonstrates buffered channel behavior.
 // A buffered channel allows sends to complete without blocking (until full).
 func BufferedDemo() int {
-	// YOUR CODE HERE
 	return 0
 }
 
