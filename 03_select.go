@@ -1,6 +1,7 @@
 package concurrency
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -34,8 +35,12 @@ import (
 // TODO: Implement using select to return whichever channel produces a value first
 // If both are ready simultaneously, either is acceptable.
 func FirstResponse(ch1, ch2 <-chan string) string {
-	// YOUR CODE HERE
-	return ""
+	var val string
+	select {
+	case val = <-ch1:
+	case val = <-ch2:
+	}
+	return val
 }
 
 // MergeChannels combines two channels into one output channel.
@@ -44,17 +49,40 @@ func FirstResponse(ch1, ch2 <-chan string) string {
 // TODO: Implement this to:
 // 1. Create an output channel
 // 2. Launch a goroutine that:
-//    - Uses select in a loop to receive from either ch1 or ch2
-//    - Sends received values to output
-//    - Handles closure of both channels properly
-//    - Closes output when BOTH inputs are closed
+//   - Uses select in a loop to receive from either ch1 or ch2
+//   - Sends received values to output
+//   - Handles closure of both channels properly
+//   - Closes output when BOTH inputs are closed
+//
 // 3. Return the output channel
 //
 // HINT: You need to track which channels are still open. A nil channel
 // in select is never ready - use this to "disable" closed channels.
 func MergeChannels(ch1, ch2 <-chan int) <-chan int {
-	// YOUR CODE HERE
-	return nil
+	merged := make(chan int)
+	go func() {
+		for ch1 != nil || ch2 != nil {
+			select {
+			case val, open := <-ch1:
+				if !open {
+					ch1 = nil
+					fmt.Println("closed ch1")
+					continue
+				}
+				merged <- val
+			case val, open := <-ch2:
+				if !open {
+					ch2 = nil
+					fmt.Println("closed ch2")
+					continue
+				}
+				merged <- val
+			}
+		}
+		close(merged)
+	}()
+
+	return merged
 }
 
 // =============================================================================
@@ -66,8 +94,12 @@ func MergeChannels(ch1, ch2 <-chan int) <-chan int {
 //
 // TODO: Use select with time.After to implement timeout
 func ReceiveWithTimeout(ch <-chan int, timeout time.Duration) (int, bool) {
-	// YOUR CODE HERE
-	return 0, false
+	select {
+	case val := <-ch:
+		return val, true
+	case <-time.After(timeout):
+		return 0, false
+	}
 }
 
 // ReceiveWithDeadline receives until a specific time.
@@ -76,8 +108,20 @@ func ReceiveWithTimeout(ch <-chan int, timeout time.Duration) (int, bool) {
 // TODO: Implement using time.After calculated from deadline
 // HINT: time.Until(deadline) gives remaining duration
 func ReceiveWithDeadline(ch <-chan int, deadline time.Time) []int {
-	// YOUR CODE HERE
-	return nil
+	vals := make([]int, 0)
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	for {
+		select {
+		case val, ok := <-ch:
+			if !ok {
+				return vals
+			}
+			vals = append(vals, val)
+		case <-timer.C:
+			return vals
+		}
+	}
 }
 
 // PeriodicTask runs a function periodically until done is closed.
@@ -86,8 +130,17 @@ func ReceiveWithDeadline(ch <-chan int, deadline time.Time) []int {
 // Call fn() every interval, stop when done is closed
 // Return the number of times fn was called
 func PeriodicTask(fn func(), interval time.Duration, done <-chan struct{}) int {
-	// YOUR CODE HERE
-	return 0
+	nCalls := 0
+	ticker := time.NewTicker(interval)
+	for {
+		select {
+		case <-ticker.C:
+			fn()
+			nCalls++
+		case <-done:
+			return nCalls
+		}
+	}
 }
 
 // =============================================================================
@@ -99,8 +152,12 @@ func PeriodicTask(fn func(), interval time.Duration, done <-chan struct{}) int {
 //
 // TODO: Use select with default to make non-blocking send
 func TrySend(ch chan<- int, value int) bool {
-	// YOUR CODE HERE
-	return false
+	select {
+	case ch <- value:
+		return true
+	default:
+		return false
+	}
 }
 
 // TryReceive attempts to receive without blocking.
@@ -108,8 +165,12 @@ func TrySend(ch chan<- int, value int) bool {
 //
 // TODO: Use select with default to make non-blocking receive
 func TryReceive(ch <-chan int) (int, bool) {
-	// YOUR CODE HERE
-	return 0, false
+	select {
+	case val := <-ch:
+		return val, true
+	default:
+		return 0, false
+	}
 }
 
 // DrainChannel empties a channel without blocking.
@@ -117,8 +178,18 @@ func TryReceive(ch <-chan int) (int, bool) {
 //
 // TODO: Loop with TryReceive until channel is empty
 func DrainChannel(ch <-chan int) []int {
-	// YOUR CODE HERE
-	return nil
+	vals := make([]int, 0)
+	for {
+		select {
+		case val, ok := <-ch:
+			if !ok {
+				return vals
+			}
+			vals = append(vals, val)
+		default:
+			return vals
+		}
+	}
 }
 
 // =============================================================================
@@ -141,8 +212,18 @@ func DrainChannel(ch <-chan int) []int {
 // HINT: You need nested selects - first try high priority with default,
 // then fall back to blocking select on both
 func PriorityReceive(highPriority, lowPriority <-chan int) (int, string) {
-	// YOUR CODE HERE
-	return 0, ""
+	select {
+	case val := <-highPriority:
+		return val, "high"
+	default:
+	}
+
+	select {
+	case val := <-highPriority:
+		return val, "high"
+	case val := <-lowPriority:
+		return val, "low"
+	}
 }
 
 // =============================================================================
@@ -155,14 +236,31 @@ func PriorityReceive(highPriority, lowPriority <-chan int) (int, string) {
 // TODO: This is tricky! You need to:
 // 1. Use an internal buffer (slice)
 // 2. select should try to:
-//    - Receive from input (if not closed) -> add to buffer
-//    - Send to output (if buffer not empty) -> remove from buffer
+//   - Receive from input (if not closed) -> add to buffer
+//   - Send to output (if buffer not empty) -> remove from buffer
+//
 // 3. Handle input closure and drain buffer before returning
 //
 // HINT: You can conditionally enable select cases using nil channels
 // If buffer is empty, set the "send" channel to nil to disable that case
 func Relay(input <-chan int, output chan<- int) {
-	// YOUR CODE HERE
+	buffer := make([]int, 0)
+	var send int
+	for input != nil || len(buffer) > 0 {
+		if len(buffer) > 0 {
+			send = buffer[0]
+			buffer = buffer[1:]
+		}
+		select {
+		case val, ok := <-input:
+			if !ok {
+				input = nil
+				continue
+			}
+			buffer = append(buffer, val)
+		case output <- send:
+		}
+	}
 }
 
 // =============================================================================

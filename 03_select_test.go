@@ -1,3 +1,5 @@
+//go:build 03tests
+
 package concurrency
 
 import (
