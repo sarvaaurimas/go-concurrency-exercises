@@ -28,16 +28,29 @@ import (
 // TODO: Implement this function to:
 // 1. Create a WaitGroup
 // 2. For each element in nums, launch a goroutine that:
-//    - Calls fn(num)
-//    - Safely adds result to a shared sum (you'll need a mutex!)
-//    - Calls Done() when finished
+//   - Calls fn(num)
+//   - Safely adds result to a shared sum (you'll need a mutex!)
+//   - Calls Done() when finished
+//
 // 3. Wait for all goroutines to complete
 // 4. Return the sum
 //
 // QUESTION: What happens if you call wg.Add(1) inside the goroutine instead of before?
 func ConcurrentSum(nums []int, fn func(int) int) int {
-	// YOUR CODE HERE
-	return 0
+	var wg sync.WaitGroup
+	var res int
+	var mu sync.Mutex
+	for _, num := range nums {
+		wg.Go(
+			func() {
+				mu.Lock()
+				res += num
+				mu.Unlock()
+			},
+		)
+	}
+	wg.Wait()
+	return res
 }
 
 // FetchAll simulates fetching data from multiple URLs concurrently.
@@ -51,8 +64,22 @@ func ConcurrentSum(nums []int, fn func(int) int) int {
 //
 // HINT: Maps are not goroutine-safe, protect with mutex or use sync.Map
 func FetchAll(urls []string, fetcher func(string) string) map[string]string {
-	// YOUR CODE HERE
-	return nil
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	results := make(map[string]string)
+
+	for _, url := range urls {
+		wg.Go(
+			func() {
+				result := fetcher(url)
+				mu.Lock()
+				results[url] = result
+				mu.Unlock()
+			},
+		)
+	}
+	wg.Wait()
+	return results
 }
 
 // =============================================================================
@@ -69,8 +96,31 @@ func FetchAll(urls []string, fetcher func(string) string) map[string]string {
 //
 // QUESTION: Why process in batches instead of all at once?
 func ProcessBatches(items []int, batchSize int, process func(int) int) []int {
-	// YOUR CODE HERE
-	return nil
+	var (
+		wg           sync.WaitGroup
+		mu           sync.Mutex
+		batchCounter int
+		results      []int
+	)
+	for _, item := range items {
+		wg.Go(
+			func() {
+				mu.Lock()
+				results = append(results, process(item))
+				mu.Unlock()
+			},
+		)
+		batchCounter++
+		if batchCounter == batchSize {
+			wg.Wait()
+			batchCounter = 0
+		}
+	}
+
+	if batchCounter != 0 {
+		wg.Wait()
+	}
+	return results
 }
 
 // WaitGroupReuse demonstrates proper WaitGroup reuse.
@@ -115,8 +165,26 @@ func FirstError(fns []func() error) error {
 // 2. Collect all errors that occur
 // 3. Return slice of errors (empty if all succeeded)
 func AllErrors(fns []func() error) []error {
-	// YOUR CODE HERE
-	return nil
+	var wg sync.WaitGroup
+	errreturn := make([]error, 0)
+	errs := make(chan error, len(fns))
+	for _, fn := range fns {
+		wg.Go(
+			func() {
+				err := fn()
+				if err != nil {
+					errs <- err
+				}
+			},
+		)
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		errreturn = append(errreturn, err)
+	}
+	return errreturn
 }
 
 // =============================================================================
