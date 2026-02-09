@@ -2,6 +2,7 @@ package concurrency
 
 import (
 	"sync"
+	"time"
 )
 
 // =============================================================================
@@ -27,29 +28,35 @@ import (
 //
 // TODO: Implement all methods to be goroutine-safe
 type Counter struct {
-	// YOUR FIELDS HERE
+	mu    sync.Mutex
+	count int
 }
 
 // NewCounter creates a new counter starting at 0.
 func NewCounter() *Counter {
 	// YOUR CODE HERE
-	return nil
+	return &Counter{}
 }
 
 // Inc increments the counter by 1.
 func (c *Counter) Inc() {
-	// YOUR CODE HERE
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.count++
 }
 
 // Dec decrements the counter by 1.
 func (c *Counter) Dec() {
-	// YOUR CODE HERE
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.count--
 }
 
 // Value returns the current count.
 func (c *Counter) Value() int {
-	// YOUR CODE HERE
-	return 0
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.count
 }
 
 // =============================================================================
@@ -64,36 +71,46 @@ func (c *Counter) Value() int {
 //
 // QUESTION: When would you use Mutex instead of RWMutex?
 type Cache struct {
-	// YOUR FIELDS HERE
+	mu      sync.RWMutex
+	storage map[string]string
 }
 
 // NewCache creates a new empty cache.
 func NewCache() *Cache {
 	// YOUR CODE HERE
-	return nil
+	return &Cache{
+		storage: map[string]string{},
+	}
 }
 
 // Get retrieves a value from the cache.
 // Returns (value, true) if found, ("", false) if not.
 func (c *Cache) Get(key string) (string, bool) {
-	// YOUR CODE HERE
-	return "", false
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	val, exists := c.storage[key]
+	return val, exists
 }
 
 // Set stores a value in the cache.
 func (c *Cache) Set(key, value string) {
-	// YOUR CODE HERE
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.storage[key] = value
 }
 
 // Delete removes a key from the cache.
 func (c *Cache) Delete(key string) {
-	// YOUR CODE HERE
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.storage, key)
 }
 
 // Len returns the number of items in the cache.
 func (c *Cache) Len() int {
-	// YOUR CODE HERE
-	return 0
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.storage)
 }
 
 // =============================================================================
@@ -119,18 +136,43 @@ func (a *Account) Balance() int {
 	return a.balance
 }
 
+func HigherID(from, to *Account) (first, second *Account) {
+	if from.ID >= to.ID {
+		return from, to
+	}
+	return to, from
+}
+
 // Transfer moves amount from account 'from' to account 'to'.
 //
 // TODO: Implement this WITHOUT deadlocks!
 //
 // WRONG approach (causes deadlock):
-//   from.mu.Lock()
-//   to.mu.Lock()    // If another goroutine does Transfer(to, from, x), deadlock!
+//
+//	from.mu.Lock()
+//	to.mu.Lock()    // If another goroutine does Transfer(to, from, x), deadlock!
 //
 // QUESTION: How do you prevent deadlock when locking multiple mutexes?
 // HINT: Always acquire locks in a consistent order (e.g., by account ID)
 func Transfer(from, to *Account, amount int) bool {
-	// YOUR CODE HERE
+	if from == to {
+		return true
+	}
+
+	// Always lock and unlock higherID account first to prevent deadlocks
+	first, second := HigherID(from, to)
+	first.mu.Lock()
+	defer first.mu.Unlock()
+	second.mu.Lock()
+	defer second.mu.Unlock()
+
+	if from.balance < amount {
+		return false
+	}
+
+	from.balance -= amount
+	to.balance += amount
+
 	return false
 }
 
@@ -181,15 +223,56 @@ func (s *SafeSlice) Len() int {
 // - CleanExpired removes all expired entries
 //
 // HINT: You'll need time.Time for timestamps and time.Duration for expiry
-type ExpiringCache struct {
-	// YOUR FIELDS HERE
+
+type CacheEntry struct {
+	val          string
+	expTimestamp time.Time
 }
 
-// NewExpiringCache creates a cache with given TTL for entries.
-// func NewExpiringCache(ttl time.Duration) *ExpiringCache {
-// 	// YOUR CODE HERE
-// 	return nil
-// }
+type ExpiringCache struct {
+	mu   sync.RWMutex
+	vals map[string]CacheEntry
+	TTL  time.Duration
+}
+
+func NewExpiringCache(ttl time.Duration) *ExpiringCache {
+	return &ExpiringCache{
+		vals: map[string]CacheEntry{},
+		TTL:  ttl,
+	}
+}
+
+func (c *ExpiringCache) Get(key string) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.vals[key]
+
+	// If doesn't exist or already expired
+	if !ok || entry.expTimestamp.Before(time.Now()) {
+		return "", false
+	}
+	return entry.val, true
+}
+
+func (c *ExpiringCache) Set(key, val string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.vals[key] = CacheEntry{
+		val:          val,
+		expTimestamp: time.Now().Add(c.TTL),
+	}
+}
+
+func (c *ExpiringCache) CleanExpired() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	for k, v := range c.vals {
+		if v.expTimestamp.Before(now) {
+			delete(c.vals, k)
+		}
+	}
+}
 
 // Ensure sync import is used
 var _ = sync.Mutex{}
