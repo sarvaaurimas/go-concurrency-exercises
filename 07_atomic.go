@@ -34,37 +34,33 @@ import (
 //
 // QUESTION: When would you use atomic counter vs mutex counter?
 type AtomicCounter struct {
-	// YOUR FIELDS HERE (hint: use int64 for atomic operations)
+	count atomic.Int64
 }
 
 // NewAtomicCounter creates a counter starting at 0.
 func NewAtomicCounter() *AtomicCounter {
 	// YOUR CODE HERE
-	return nil
+	return &AtomicCounter{}
 }
 
 // Inc increments and returns the new value.
 func (c *AtomicCounter) Inc() int64 {
-	// YOUR CODE HERE
-	return 0
+	return c.count.Add(1)
 }
 
 // Dec decrements and returns the new value.
 func (c *AtomicCounter) Dec() int64 {
-	// YOUR CODE HERE
-	return 0
+	return c.count.Add(-1)
 }
 
 // Add adds delta and returns the new value.
 func (c *AtomicCounter) Add(delta int64) int64 {
-	// YOUR CODE HERE
-	return 0
+	return c.count.Add(delta)
 }
 
 // Value returns the current count.
 func (c *AtomicCounter) Value() int64 {
-	// YOUR CODE HERE
-	return 0
+	return c.count.Load()
 }
 
 // =============================================================================
@@ -77,13 +73,13 @@ func (c *AtomicCounter) Value() int64 {
 // - Update should atomically update max if new value is larger
 // - Must handle concurrent updates correctly
 type MaxTracker struct {
-	// YOUR FIELDS HERE
+	maxVal atomic.Int64
 }
 
 // NewMaxTracker creates a tracker with initial max of 0.
 func NewMaxTracker() *MaxTracker {
 	// YOUR CODE HERE
-	return nil
+	return &MaxTracker{}
 }
 
 // Update updates the max if val is larger. Returns the new max.
@@ -97,14 +93,24 @@ func NewMaxTracker() *MaxTracker {
 //	    // CAS failed, another goroutine updated, retry
 //	}
 func (m *MaxTracker) Update(val int64) int64 {
-	// YOUR CODE HERE
-	return 0
+	for {
+		curr := m.maxVal.Load()
+
+		// Val is the same
+		if val <= curr {
+			return curr
+		}
+
+		if m.maxVal.CompareAndSwap(curr, val) {
+			return val
+		}
+
+	}
 }
 
 // Max returns the current maximum.
 func (m *MaxTracker) Max() int64 {
-	// YOUR CODE HERE
-	return 0
+	return m.maxVal.Load()
 }
 
 // =============================================================================
@@ -185,10 +191,11 @@ func (s *SpinLock) Unlock() {
 // - Both should use CAS loops
 //
 // HINT: atomic.Pointer[T] is cleaner than atomic.Value for typed pointers:
-//   var head atomic.Pointer[Node]
-//   head.Store(newNode)
-//   current := head.Load()
-//   head.CompareAndSwap(old, new)
+//
+//	var head atomic.Pointer[Node]
+//	head.Store(newNode)
+//	current := head.Load()
+//	head.CompareAndSwap(old, new)
 //
 // HINT: Stack node contains value and pointer to next node
 type LockFreeStack struct {

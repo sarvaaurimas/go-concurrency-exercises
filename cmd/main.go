@@ -3,33 +3,25 @@ package main
 import (
 	"fmt"
 	"sync"
+	"time"
 )
 
-func FetchAll(urls []string, fetcher func(string) string) map[string]string {
+func main() {
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-	results := make(map[string]string)
+	b := NewBarrier(20)
 
-	for _, url := range urls {
-		wg.Go(
-			func() {
-				result := fetcher(url)
-				mu.Lock()
-				results[url] = result
-				mu.Unlock()
-			},
+	for i := range 20 {
+		time.Sleep(1000 * time.Millisecond)
+		wg.Go(func() {
+			fmt.Printf("Goroutine %d started\n", i)
+			b.Wait()
+			fmt.Printf("Goroutine %d resumed\n", i)
+			time.Sleep(1000 * time.Millisecond)
+			fmt.Printf("Goroutine %d started\n", i)
+			b.Wait()
+			fmt.Printf("Goroutine %d resumed\n", i)
+		},
 		)
 	}
 	wg.Wait()
-	return results
-}
-
-func Fetch(url string) string {
-	return url
-}
-
-func main() {
-	urls := []string{"hi", "hello", "yo"}
-	results := FetchAll(urls, Fetch)
-	fmt.Println(results)
 }

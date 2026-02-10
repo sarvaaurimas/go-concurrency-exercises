@@ -42,19 +42,25 @@ type ExpensiveResource struct {
 // - Multiple concurrent calls to Get should all receive the same instance
 // - createFn should only be called once, ever
 type ResourceManager struct {
-	// YOUR FIELDS HERE
+	once     sync.Once
+	createFn func() *ExpensiveResource
+	res      *ExpensiveResource
 }
 
 // NewResourceManager creates a manager with the given creation function.
 func NewResourceManager(createFn func() *ExpensiveResource) *ResourceManager {
 	// YOUR CODE HERE
-	return nil
+	return &ResourceManager{
+		createFn: createFn,
+	}
 }
 
 // Get returns the resource, creating it if necessary.
 func (rm *ResourceManager) Get() *ExpensiveResource {
-	// YOUR CODE HERE
-	return nil
+	rm.once.Do(func() {
+		rm.res = rm.createFn()
+	})
+	return rm.res
 }
 
 // =============================================================================
@@ -83,23 +89,20 @@ type Config struct {
 // may need sync.OnceFunc (Go 1.21+) or a custom pattern with OnceValue/OnceValues.
 type ConfigLoader struct {
 	// YOUR FIELDS HERE
+	getConfig func() *Config
 }
 
 // NewConfigLoader creates a loader with the given loading function.
 func NewConfigLoader(loader func() *Config) *ConfigLoader {
 	// YOUR CODE HERE
-	return nil
-}
-
-// Load loads the configuration (only first call does actual loading).
-func (cl *ConfigLoader) Load() {
-	// YOUR CODE HERE
+	return &ConfigLoader{
+		getConfig: sync.OnceValue(loader),
+	}
 }
 
 // Get returns the loaded config, or nil if not yet loaded.
 func (cl *ConfigLoader) Get() *Config {
-	// YOUR CODE HERE
-	return nil
+	return cl.getConfig()
 }
 
 // =============================================================================
@@ -116,30 +119,55 @@ func (cl *ConfigLoader) Get() *Config {
 //
 // QUESTION: Why use Cond instead of channels here?
 type BoundedQueue struct {
-	// YOUR FIELDS HERE
+	mu       sync.Mutex
+	notFull  *sync.Cond
+	notEmpty *sync.Cond
+	queue    []int
 }
 
 // NewBoundedQueue creates a queue with the given capacity.
 func NewBoundedQueue(capacity int) *BoundedQueue {
-	// YOUR CODE HERE
-	return nil
+	q := &BoundedQueue{
+		queue: make([]int, 0, capacity),
+	}
+	q.notFull = sync.NewCond(&q.mu)
+	q.notEmpty = sync.NewCond(&q.mu)
+	return q
 }
 
 // Put adds an item to the queue, blocking if full.
 func (q *BoundedQueue) Put(item int) {
-	// YOUR CODE HERE
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	// Wait if full
+	for len(q.queue) == cap(q.queue) {
+		q.notFull.Wait()
+	}
+	q.queue = append(q.queue, item)
+	// Wake one sleeping get
+	q.notEmpty.Signal()
 }
 
 // Get removes and returns an item, blocking if empty.
 func (q *BoundedQueue) Get() int {
-	// YOUR CODE HERE
-	return 0
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	// Wait if empty
+	for len(q.queue) == 0 {
+		q.notEmpty.Wait()
+	}
+	item := q.queue[0]
+	q.queue = q.queue[1:]
+	// Wake one sleeping put
+	q.notFull.Signal()
+	return item
 }
 
 // Len returns current number of items in queue.
 func (q *BoundedQueue) Len() int {
-	// YOUR CODE HERE
-	return 0
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.queue)
 }
 
 // =============================================================================
@@ -156,20 +184,34 @@ func (q *BoundedQueue) Len() int {
 //
 // QUESTION: How is this different from WaitGroup?
 type Barrier struct {
-	// YOUR FIELDS HERE
+	ready  *sync.Cond
+	capGo  int
+	currGo int
 }
 
 // NewBarrier creates a barrier for n goroutines.
 func NewBarrier(n int) *Barrier {
-	// YOUR CODE HERE
-	return nil
+	return &Barrier{
+		ready: sync.NewCond(&sync.Mutex{}),
+		capGo: n,
+	}
 }
 
 // Wait blocks until all n goroutines have reached the barrier.
 // Returns the order in which this goroutine arrived (1 to n).
-func (b *Barrier) Wait() int {
-	// YOUR CODE HERE
-	return 0
+func (b *Barrier) Wait() (order int) {
+	b.ready.L.Lock()
+	defer b.ready.L.Unlock()
+
+	b.currGo++
+	order = b.currGo
+	if b.currGo < b.capGo {
+		b.ready.Wait()
+	} else {
+		b.ready.Broadcast()
+		b.currGo = 0
+	}
+	return order
 }
 
 // =============================================================================
@@ -196,5 +238,7 @@ type RWBarrier struct {
 // }
 
 // Ensure sync import is used
-var _ = sync.Once{}
-var _ = sync.Cond{}
+var (
+	_ = sync.Once{}
+	_ = sync.Cond{}
+)
