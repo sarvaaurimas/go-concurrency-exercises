@@ -2,10 +2,9 @@ package concurrency
 
 import (
 	"errors"
+	"log"
 	"sync"
 	"time"
-
-	"github.com/ethereum/go-ethereum/log"
 )
 
 // =============================================================================

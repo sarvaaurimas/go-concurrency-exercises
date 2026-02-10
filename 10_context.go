@@ -2,6 +2,7 @@ package concurrency
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -45,8 +46,16 @@ import (
 //
 // QUESTION: Why check ctx.Done() in a select instead of just <-ctx.Done()?
 func DoWorkWithCancel(ctx context.Context) int {
-	// YOUR CODE HERE
-	return 0
+	var count int
+	for {
+		select {
+		case <-ctx.Done():
+			return count
+		default:
+		}
+		count++
+		time.Sleep(100 * time.Second)
+	}
 }
 
 // SearchWithCancel searches for target in a slow data source.
@@ -57,7 +66,16 @@ func DoWorkWithCancel(ctx context.Context) int {
 // 2. Return immediately if ctx is cancelled
 // 3. Return result if found
 func SearchWithCancel(ctx context.Context, dataSource []string, target string) (string, bool) {
-	// YOUR CODE HERE
+	for _, item := range dataSource {
+		select {
+		case <-ctx.Done():
+			return "", false
+		case <-time.After(50 * time.Millisecond):
+			if item == target {
+				return item, true
+			}
+		}
+	}
 	return "", false
 }
 
@@ -65,28 +83,15 @@ func SearchWithCancel(ctx context.Context, dataSource []string, target string) (
 // PART 2: Timeouts
 // =============================================================================
 
-// FetchWithTimeout fetches data with a timeout.
-// The fetcher function simulates a slow operation.
-//
-// TODO: Implement to:
-// 1. Create a context with timeout
-// 2. Run fetcher in a goroutine
-// 3. Return result if fetcher completes in time
-// 4. Return error if timeout
-//
-// QUESTION: What happens to the goroutine if timeout occurs? (Goroutine leak!)
-func FetchWithTimeout(fetcher func() string, timeout time.Duration) (string, error) {
-	// YOUR CODE HERE
-	return "", nil
-}
-
 // FetchWithTimeoutClean is like above but avoids goroutine leaks.
 //
 // TODO: Pass context to fetcher so it can check for cancellation
 // The fetcher should periodically check ctx.Done() and return early
-func FetchWithTimeoutClean(fetcher func(ctx context.Context) string, timeout time.Duration) (string, error) {
-	// YOUR CODE HERE
-	return "", nil
+func FetchWithTimeoutClean(fetcher func(ctx context.Context) (string, error), timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	result, err := fetcher(ctx)
+	return result, err
 }
 
 // =============================================================================
@@ -102,10 +107,88 @@ func FetchWithTimeoutClean(fetcher func(ctx context.Context) string, timeout tim
 // - Stage 3: Collect results
 // All stages should stop promptly when ctx is cancelled.
 //
+
+func GenerateCtx(ctx context.Context, start, end int) <-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for val := range end - start {
+			select {
+			case <-ctx.Done():
+				return
+			case out <- start + val:
+			}
+		}
+	}()
+	return out
+}
+
+// Square receives integers, squares them, and sends results.
+// This is a TRANSFORM stage of a pipeline.
+//
+// TODO: Implement this function to:
+// 1. Create an output channel
+// 2. Launch a goroutine that:
+//   - Ranges over the input channel
+//   - Sends the square of each value to output
+//   - Closes output when input is exhausted
+//
+// 3. Return the output channel immediately
+//
+// QUESTION: What happens if you forget to close the output channel?
+func SquareCtx(ctx context.Context, in <-chan int) <-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case val, ok := <-in:
+				if !ok {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case out <- val * val:
+				}
+			}
+		}
+	}()
+	return out
+}
+
+// Sum receives integers and returns their sum.
+// This is a SINK stage of a pipeline.
+//
+// TODO: Implement this function to:
+// 1. Range over the input channel
+// 2. Accumulate the sum
+// 3. Return the total
+//
+// NOTE: This function blocks until the channel is closed!
+func SumCtx(ctx context.Context, in <-chan int) int {
+	var sum int
+	for {
+		select {
+		case <-ctx.Done():
+			return sum
+		case val, ok := <-in:
+			if !ok {
+				return sum
+			}
+			sum += val
+		}
+	}
+}
+
 // QUESTION: If stage 2 is slow, do stages 1 and 3 still respond to cancellation?
-func ProcessPipeline(ctx context.Context) []int {
-	// YOUR CODE HERE
-	return nil
+func ProcessPipeline(ctx context.Context, start, end int) int {
+	gen := GenerateCtx(ctx, start, end)
+	sq := SquareCtx(ctx, gen)
+	return SumCtx(ctx, sq)
 }
 
 // =============================================================================
@@ -122,7 +205,36 @@ func ProcessPipeline(ctx context.Context) []int {
 // 4. Cancel context to stop other fetchers
 // 5. Return "" if all fail or parent ctx cancelled
 func FirstSuccess(ctx context.Context, fetchers []func(context.Context) string) string {
-	// YOUR CODE HERE
+	var wg sync.WaitGroup
+	newCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan string, len(fetchers))
+
+	// Launch all concurrently
+	for _, fetcher := range fetchers {
+		wg.Go(func() {
+			select {
+			case results <- fetcher(newCtx):
+			case <-newCtx.Done():
+				return
+
+			}
+		})
+	}
+
+	// If all are done with no results close the results chan
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	for result := range results {
+		if result != "" {
+			cancel()
+			return result
+		}
+	}
+
 	return ""
 }
 
@@ -134,6 +246,8 @@ func FirstSuccess(ctx context.Context, fetchers []func(context.Context) string) 
 // 2. If any returns "", cancel others and return nil
 // 3. If ctx cancelled, return nil
 // 4. Otherwise return all results
+
+// Same as before just now the result chan does cancel on == "" and return nil and at the results stage do a for select that if og ctx is cancelled, return nil
 func AllSuccess(ctx context.Context, fetchers []func(context.Context) string) []string {
 	// YOUR CODE HERE
 	return nil
@@ -150,15 +264,17 @@ const RequestIDKey contextKey = "requestID"
 
 // WithRequestID adds a request ID to the context.
 func WithRequestID(ctx context.Context, id string) context.Context {
-	// YOUR CODE HERE
-	return ctx
+	return context.WithValue(ctx, RequestIDKey, id)
 }
 
 // GetRequestID retrieves request ID from context.
 // Returns "" if not present.
 func GetRequestID(ctx context.Context) string {
-	// YOUR CODE HERE
-	return ""
+	ID, ok := ctx.Value(RequestIDKey).(string)
+	if !ok {
+		return ""
+	}
+	return ID
 }
 
 // ProcessRequest simulates processing that logs with request ID.
@@ -207,5 +323,7 @@ type ShutdownCoordinator struct {
 // }
 
 // Ensure imports are used
-var _ = context.Background
-var _ = time.Second
+var (
+	_ = context.Background
+	_ = time.Second
+)
