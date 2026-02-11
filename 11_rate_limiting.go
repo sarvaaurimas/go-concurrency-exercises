@@ -2,6 +2,7 @@ package concurrency
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -32,23 +33,30 @@ import (
 //
 // QUESTION: What happens if you call Wait() faster than the interval?
 type TickerLimiter struct {
-	// YOUR FIELDS HERE
+	ticker *time.Ticker
+	done   chan struct{}
 }
 
 // NewTickerLimiter creates a limiter allowing one op per interval.
 func NewTickerLimiter(interval time.Duration) *TickerLimiter {
 	// YOUR CODE HERE
-	return nil
+	return &TickerLimiter{
+		ticker: time.NewTicker(interval),
+	}
 }
 
 // Wait blocks until the next operation is allowed.
 func (tl *TickerLimiter) Wait() {
-	// YOUR CODE HERE
+	select {
+	case <-tl.ticker.C:
+	case <-tl.done:
+	}
 }
 
 // Stop releases resources.
 func (tl *TickerLimiter) Stop() {
-	// YOUR CODE HERE
+	tl.ticker.Stop()
+	close(tl.done)
 }
 
 // =============================================================================
@@ -66,32 +74,73 @@ func (tl *TickerLimiter) Stop() {
 //
 // QUESTION: How does token bucket differ from ticker limiter?
 type TokenBucket struct {
-	// YOUR FIELDS HERE
+	tokens chan struct{}
 }
 
 // NewTokenBucket creates a bucket with given capacity and refill rate.
 // Starts full.
-func NewTokenBucket(capacity int, refillRate float64) *TokenBucket {
-	// YOUR CODE HERE
-	return nil
+func NewTokenBucket(ctx context.Context, capacity int, refillRate float64) *TokenBucket {
+	tb := TokenBucket{
+		tokens: make(chan struct{}, capacity),
+	}
+	tickInt := time.Duration(float64(time.Second) / refillRate)
+	ticker := time.Tick(tickInt)
+
+	// Fill the bucket first
+	for range capacity {
+		tb.tokens <- struct{}{}
+	}
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker:
+				select {
+				case tb.tokens <- struct{}{}:
+				// Drop if full
+				default:
+				}
+			}
+		}
+	}()
+	return &tb
 }
 
 // Take removes n tokens, blocking until available.
 func (tb *TokenBucket) Take(n int) {
-	// YOUR CODE HERE
+	for range n {
+		<-tb.tokens
+	}
 }
 
 // TryTake attempts to remove n tokens without blocking.
 // Returns true if successful.
 func (tb *TokenBucket) TryTake(n int) bool {
-	// YOUR CODE HERE
-	return false
+	var taken int
+	for range n {
+		select {
+		case <-tb.tokens:
+			taken++
+		default:
+			// Return what we've taken
+			for range taken {
+				select {
+				case tb.tokens <- struct{}{}:
+				default:
+					// Drop if it has already been refilled to max capacity
+				}
+			}
+			return false
+		}
+	}
+	return true
 }
 
 // Available returns current number of tokens (approximate).
 func (tb *TokenBucket) Available() int {
-	// YOUR CODE HERE
-	return 0
+	return len(tb.tokens)
 }
 
 // =============================================================================
@@ -104,18 +153,27 @@ func (tb *TokenBucket) Available() int {
 // - WaitN(ctx, n) waits for n tokens, respects cancellation
 // - Returns error if context cancelled before tokens available
 type ContextLimiter struct {
-	// YOUR FIELDS HERE
+	ticker <-chan time.Time
 }
 
 // NewContextLimiter creates a limiter with given rate (ops per second).
 func NewContextLimiter(rate float64) *ContextLimiter {
-	// YOUR CODE HERE
-	return nil
+	if rate <= 0 {
+		panic("Rate leq 0")
+	}
+	ticker := time.Tick(time.Duration(float64(time.Second) / rate))
+	return &ContextLimiter{ticker: ticker}
 }
 
 // WaitN waits for n tokens, respecting context cancellation.
 func (cl *ContextLimiter) WaitN(ctx context.Context, n int) error {
-	// YOUR CODE HERE
+	for range n {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-cl.ticker:
+		}
+	}
 	return nil
 }
 
@@ -132,22 +190,45 @@ func (cl *ContextLimiter) WaitN(ctx context.Context, n int) error {
 // - Stale keys can be cleaned up (optional)
 //
 // QUESTION: What's the memory concern with per-key limiters?
+
+type UserLimiter struct {
+	userBucket *TokenBucket
+	expDate    time.Time
+}
+
 type PerKeyLimiter struct {
-	// YOUR FIELDS HERE
+	mu            sync.Mutex
+	usersLimiters map[string]*UserLimiter
+	capacity      int
+	refillRate    float64
+	expDuration   time.Duration
 }
 
 // NewPerKeyLimiter creates a per-key limiter.
 // Each key gets a bucket with given capacity and rate.
-func NewPerKeyLimiter(capacity int, refillRate float64) *PerKeyLimiter {
-	// YOUR CODE HERE
-	return nil
+func NewPerKeyLimiter(capacity int, refillRate float64, expDuration time.Duration) *PerKeyLimiter {
+	return &PerKeyLimiter{
+		capacity:      capacity,
+		refillRate:    refillRate,
+		expDuration:   expDuration,
+		usersLimiters: map[string]*UserLimiter{},
+	}
 }
 
 // Allow checks if operation is allowed for given key.
 // Consumes one token if allowed.
 func (pkl *PerKeyLimiter) Allow(key string) bool {
-	// YOUR CODE HERE
-	return false
+	pkl.mu.Lock()
+	userLimiter, ok := pkl.usersLimiters[key]
+	if !ok {
+		// Initialise new one
+		pkl.usersLimiters[key] = &UserLimiter{
+			userBucket: NewTokenBucket(context.Background(), pkl.capacity, pkl.refillRate),
+		}
+	}
+	userLimiter.expDate = time.Now().Add(pkl.expDuration)
+	pkl.mu.Unlock()
+	return userLimiter.userBucket.TryTake(1)
 }
 
 // =============================================================================
@@ -163,30 +244,78 @@ func (pkl *PerKeyLimiter) Allow(key string) bool {
 // - If queue is full, new items are dropped
 // - Process function is called for each item at steady rate
 type LeakyBucket struct {
-	// YOUR FIELDS HERE
+	queue  chan int
+	ticker <-chan time.Time
+
+	mu      sync.Mutex
+	started bool
+	cancel  context.CancelFunc
 }
 
 // NewLeakyBucket creates a bucket with given queue size and drain rate.
 func NewLeakyBucket(queueSize int, drainRate float64) *LeakyBucket {
-	// YOUR CODE HERE
-	return nil
+	if drainRate <= 0.0 {
+		panic("Invalid drain rate")
+	}
+
+	if queueSize <= 0 {
+		panic("Invalid queue size")
+	}
+	return &LeakyBucket{
+		queue:  make(chan int, queueSize),
+		ticker: time.Tick(time.Duration(float64(time.Second) / drainRate)),
+	}
 }
 
 // Add adds an item to the bucket.
 // Returns false if bucket is full (item dropped).
 func (lb *LeakyBucket) Add(item int) bool {
-	// YOUR CODE HERE
-	return false
+	select {
+	case lb.queue <- item:
+		return true
+	default:
+		return false
+	}
 }
 
 // Start begins draining the bucket, calling process for each item.
 func (lb *LeakyBucket) Start(process func(int)) {
-	// YOUR CODE HERE
+	// Initialise for in case started is called
+	lb.mu.Lock()
+	if lb.started {
+		lb.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	lb.cancel = cancel
+	lb.started = true
+	lb.mu.Unlock()
+
+	go func() {
+		for {
+			select {
+			case <-lb.ticker:
+				select {
+				case item := <-lb.queue:
+					process(item)
+				default:
+					// Only pick one if available
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 // Stop stops the bucket processing.
 func (lb *LeakyBucket) Stop() {
-	// YOUR CODE HERE
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	if lb.started {
+		lb.cancel()
+		lb.started = false
+	}
 }
 
 // =============================================================================
@@ -213,5 +342,7 @@ type AdaptiveLimiter struct {
 // }
 
 // Ensure imports are used
-var _ = context.Background
-var _ = time.Second
+var (
+	_ = context.Background
+	_ = time.Second
+)
