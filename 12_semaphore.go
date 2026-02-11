@@ -2,6 +2,7 @@ package concurrency
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -34,30 +35,36 @@ import (
 //
 // QUESTION: Why use struct{} instead of bool or int?
 type Semaphore struct {
-	// YOUR FIELDS HERE
+	sem chan struct{}
 }
 
 // NewSemaphore creates a semaphore allowing n concurrent operations.
 func NewSemaphore(n int) *Semaphore {
 	// YOUR CODE HERE
-	return nil
+	return &Semaphore{
+		sem: make(chan struct{}, n),
+	}
 }
 
 // Acquire blocks until a slot is available.
 func (s *Semaphore) Acquire() {
-	// YOUR CODE HERE
+	<-s.sem
 }
 
 // Release frees a slot.
 func (s *Semaphore) Release() {
-	// YOUR CODE HERE
+	s.sem <- struct{}{}
 }
 
 // TryAcquire attempts to acquire without blocking.
 // Returns true if successful.
 func (s *Semaphore) TryAcquire() bool {
-	// YOUR CODE HERE
-	return false
+	select {
+	case <-s.sem:
+		return true
+	default:
+		return false
+	}
 }
 
 // =============================================================================
@@ -66,36 +73,49 @@ func (s *Semaphore) TryAcquire() bool {
 
 // TimeoutSemaphore supports timeout on acquire.
 type TimeoutSemaphore struct {
-	// YOUR FIELDS HERE
+	sem chan struct{}
 }
 
 // NewTimeoutSemaphore creates a semaphore with timeout support.
 func NewTimeoutSemaphore(n int) *TimeoutSemaphore {
-	// YOUR CODE HERE
-	return nil
+	sem := make(chan struct{}, n)
+	for range n {
+		sem <- struct{}{}
+	}
+	return &TimeoutSemaphore{
+		sem: sem,
+	}
 }
 
 // Acquire blocks until a slot is available.
 func (s *TimeoutSemaphore) Acquire() {
-	// YOUR CODE HERE
+	<-s.sem
 }
 
 // AcquireTimeout tries to acquire within timeout.
 // Returns true if acquired, false if timeout.
 func (s *TimeoutSemaphore) AcquireTimeout(timeout time.Duration) bool {
-	// YOUR CODE HERE
-	return false
+	select {
+	case <-s.sem:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // AcquireContext tries to acquire, respecting context cancellation.
 func (s *TimeoutSemaphore) AcquireContext(ctx context.Context) error {
-	// YOUR CODE HERE
-	return nil
+	select {
+	case <-s.sem:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Release frees a slot.
 func (s *TimeoutSemaphore) Release() {
-	// YOUR CODE HERE
+	s.sem <- struct{}{}
 }
 
 // =============================================================================
@@ -111,8 +131,25 @@ func (s *TimeoutSemaphore) Release() {
 //
 // HINT: Use semaphore + WaitGroup
 func BoundedParallel(fns []func() int, limit int) []int {
-	// YOUR CODE HERE
-	return nil
+	var (
+		wg sync.WaitGroup
+		mu sync.Mutex
+	)
+	results := make([]int, len(fns))
+	sem := NewSemaphore(limit)
+	for i, fn := range fns {
+		wg.Go(func() {
+			sem.Acquire()
+			res := fn()
+			sem.Release()
+			mu.Lock()
+			// This keeps results in the same order
+			results[i] = res
+			mu.Unlock()
+		})
+	}
+	wg.Wait()
+	return results
 }
 
 // BoundedParallelError is like above but functions can return errors.
@@ -121,7 +158,38 @@ func BoundedParallel(fns []func() int, limit int) []int {
 // TODO: Implement with early termination on error
 // HINT: Combine semaphore, WaitGroup, context, and error channel
 func BoundedParallelError(ctx context.Context, fns []func(context.Context) error, limit int) error {
-	// YOUR CODE HERE
+	var wg sync.WaitGroup
+
+	errs := make(chan error, len(fns))
+	sem := NewTimeoutSemaphore(limit)
+	localCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go func() {
+		for _, fn := range fns {
+			// If parent ctx is cancelled it will stop and return
+			err := sem.AcquireContext(localCtx)
+			if err != nil {
+				// Dont spawn no more
+				break
+			}
+			wg.Go(func() {
+				defer sem.Release()
+				errs <- fn(localCtx)
+			})
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(errs)
+	}()
+
+	for err := range errs {
+		if err != nil {
+			cancel()
+			return err
+		}
+	}
 	return nil
 }
 
@@ -138,30 +206,51 @@ func BoundedParallelError(ctx context.Context, fns []func(context.Context) error
 // - Total available slots is 'capacity'
 //
 // QUESTION: Why can't this be implemented with a simple buffered channel?
+
+// We implement a semaphore where big acquisitions can be starved
 type WeightedSemaphore struct {
-	// YOUR FIELDS HERE
+	newAv  *sync.Cond
+	currAv int64
 }
 
 // NewWeightedSemaphore creates a semaphore with given total capacity.
 func NewWeightedSemaphore(capacity int64) *WeightedSemaphore {
 	// YOUR CODE HERE
-	return nil
+	return &WeightedSemaphore{
+		currAv: capacity,
+		newAv:  sync.NewCond(&sync.Mutex{}),
+	}
 }
 
 // Acquire blocks until n slots are available.
 func (ws *WeightedSemaphore) Acquire(n int64) {
-	// YOUR CODE HERE
+	ws.newAv.L.Lock()
+	defer ws.newAv.L.Unlock()
+	// Wait if current available less than n
+	for n > ws.currAv {
+		ws.newAv.Wait()
+	}
+	ws.currAv -= n
 }
 
 // TryAcquire attempts to acquire n slots without blocking.
 func (ws *WeightedSemaphore) TryAcquire(n int64) bool {
-	// YOUR CODE HERE
-	return false
+	ws.newAv.L.Lock()
+	defer ws.newAv.L.Unlock()
+	if n > ws.currAv {
+		return false
+	}
+	ws.currAv -= n
+	return true
 }
 
 // Release frees n slots.
 func (ws *WeightedSemaphore) Release(n int64) {
-	// YOUR CODE HERE
+	ws.newAv.L.Lock()
+	defer ws.newAv.L.Unlock()
+	ws.currAv += n
+	// Wake up all and let them figure out if they have to go back to sleep or not
+	ws.newAv.Broadcast()
 }
 
 // =============================================================================
@@ -184,35 +273,52 @@ type Connection struct {
 //
 // HINT: This is basically a semaphore + a slice of resources
 type ConnectionPool struct {
-	// YOUR FIELDS HERE
+	sem   chan struct{}
+	mu    sync.Mutex
+	conns []*Connection
 }
 
 // NewConnectionPool creates a pool with n connections.
 func NewConnectionPool(n int, factory func(id int) *Connection) *ConnectionPool {
-	// YOUR CODE HERE
-	return nil
+	conns := make([]*Connection, 0, n)
+	sem := make(chan struct{}, n)
+	for ID := range n {
+		conns = append(conns, factory(ID))
+		sem <- struct{}{}
+	}
+	return &ConnectionPool{
+		sem:   sem,
+		conns: conns,
+	}
 }
 
 // Get retrieves a connection from the pool, blocking if necessary.
 func (cp *ConnectionPool) Get() *Connection {
-	// YOUR CODE HERE
-	return nil
-}
-
-// GetTimeout tries to get a connection within timeout.
-func (cp *ConnectionPool) GetTimeout(timeout time.Duration) (*Connection, bool) {
-	// YOUR CODE HERE
-	return nil, false
+	<-cp.sem
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	lastidx := len(cp.conns) - 1
+	c := cp.conns[lastidx]
+	cp.conns = cp.conns[:lastidx]
+	return c
 }
 
 // Put returns a connection to the pool.
 func (cp *ConnectionPool) Put(conn *Connection) {
-	// YOUR CODE HERE
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	cp.conns = append(cp.conns, conn)
+	cp.sem <- struct{}{}
 }
 
 // Close closes all connections in the pool.
 func (cp *ConnectionPool) Close() {
-	// YOUR CODE HERE
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	// Can call close  if connections had a close func
+	for i := range cp.conns {
+		cp.conns[i] = nil
+	}
 }
 
 // =============================================================================
@@ -235,5 +341,7 @@ type FairSemaphore struct {
 // }
 
 // Ensure imports are used
-var _ = context.Background
-var _ = time.Second
+var (
+	_ = context.Background
+	_ = time.Second
+)
