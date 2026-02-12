@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // =============================================================================
@@ -47,12 +49,19 @@ type ErrGroup struct {
 }
 
 func (g *ErrGroup) Go(f func() error) {
-	// YOUR CODE HERE
+	g.wg.Go(func() {
+		err := f()
+		if err != nil {
+			g.errOnce.Do(func() {
+				g.err = err
+			})
+		}
+	})
 }
 
 func (g *ErrGroup) Wait() error {
-	// YOUR CODE HERE
-	return nil
+	g.wg.Wait()
+	return g.err
 }
 
 // =============================================================================
@@ -67,21 +76,35 @@ func (g *ErrGroup) Wait() error {
 // 2. When any Go() function returns error, cancel the context
 // 3. All goroutines should check ctx.Done() to exit early
 type ErrGroupWithContext struct {
-	// YOUR FIELDS HERE
+	wg      sync.WaitGroup
+	errOnce sync.Once
+	err     error
+	cancel  context.CancelFunc
 }
 
 func WithContext(ctx context.Context) (*ErrGroupWithContext, context.Context) {
-	// YOUR CODE HERE
-	return nil, ctx
+	newCtx, cancel := context.WithCancel(ctx)
+	return &ErrGroupWithContext{
+		cancel: cancel,
+	}, newCtx
 }
 
 func (g *ErrGroupWithContext) Go(f func() error) {
-	// YOUR CODE HERE
+	g.wg.Go(func() {
+		err := f()
+		if err != nil {
+			g.errOnce.Do(func() {
+				g.err = err
+				g.cancel()
+			})
+		}
+	})
 }
 
 func (g *ErrGroupWithContext) Wait() error {
-	// YOUR CODE HERE
-	return nil
+	defer g.cancel()
+	g.wg.Wait()
+	return g.err
 }
 
 // =============================================================================
@@ -97,9 +120,23 @@ func (g *ErrGroupWithContext) Wait() error {
 // 3. If all succeed, return all results
 //
 // QUESTION: What happens to in-flight requests when context is cancelled?
-func FetchAllURLs(ctx context.Context, urls []string, fetcher func(context.Context, string) (string, error)) ([]string, error) {
-	// YOUR CODE HERE
-	return nil, nil
+
+func FetchAllURLsPartial(ctx context.Context, urls []string, fetcher func(context.Context, string) (string, error)) ([]string, error) {
+	g, gCtx := errgroup.WithContext(ctx)
+	results := make([]string, len(urls))
+
+	for i, url := range urls {
+		g.Go(func() error {
+			val, err := fetcher(gCtx, url)
+			if err != nil {
+				return err
+			}
+			// Mutex is not needed here as we're not appending but accessing by index
+			results[i] = val
+			return nil
+		})
+	}
+	return results, g.Wait()
 }
 
 // FetchAllURLsPartial is like above but collects partial results.
@@ -111,10 +148,6 @@ func FetchAllURLs(ctx context.Context, urls []string, fetcher func(context.Conte
 // 3. Return partial results + first error
 //
 // HINT: Use mutex to protect results slice
-func FetchAllURLsPartial(ctx context.Context, urls []string, fetcher func(context.Context, string) (string, error)) ([]string, error) {
-	// YOUR CODE HERE
-	return nil, nil
-}
 
 // =============================================================================
 // PART 4: ErrGroup with Limit
@@ -226,8 +259,24 @@ type PipelineStage func(ctx context.Context, in <-chan int, out chan<- int) erro
 //
 // QUESTION: How do you ensure channels are closed properly?
 func RunErrGroupPipeline(ctx context.Context, input <-chan int, stages ...PipelineStage) (<-chan int, func() error) {
-	// YOUR CODE HERE
-	return nil, func() error { return nil }
+	var output chan int
+	g, gCtx := errgroup.WithContext(ctx)
+	errChan := make(chan error, 1)
+
+	for _, stage := range stages {
+		output = make(chan int)
+		g.Go(func() error {
+			defer close(output)
+			// Context will make sure all these finish, do we need to close chans?
+			return stage(gCtx, input, output)
+		})
+		input = output
+	}
+	go func() {
+		err := g.Wait()
+		errChan <- err
+	}()
+	return output, func() error { return <-errChan }
 }
 
 // =============================================================================
@@ -256,6 +305,8 @@ func RunWithRetry(ctx context.Context, tasks []RetryTask, maxConcurrent int) map
 }
 
 // Ensure imports are used
-var _ = context.Background
-var _ = errors.New
-var _ = sync.WaitGroup{}
+var (
+	_ = context.Background
+	_ = errors.New
+	_ = sync.WaitGroup{}
+)

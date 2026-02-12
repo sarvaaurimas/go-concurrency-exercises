@@ -189,8 +189,8 @@ func DeadlockChannelWaitGroup() []int {
 		}(i)
 	}
 
-	wg.Wait()   // Waits for all goroutines
-	close(ch)   // Close after all sends done
+	wg.Wait() // Waits for all goroutines
+	close(ch) // Close after all sends done
 
 	var results []int
 	for v := range ch {
@@ -241,8 +241,6 @@ func FixSelectNilChannels() string {
 
 // ProcessItems has a deadlock under certain conditions.
 // Find and fix it!
-//
-// HINT: Think about what happens when len(items) > buffer size
 func ProcessItems(items []int, processor func(int) int) []int {
 	results := make(chan int, 5) // Fixed buffer
 	var wg sync.WaitGroup
@@ -270,8 +268,24 @@ func ProcessItems(items []int, processor func(int) int) []int {
 //
 // TODO: Fix the deadlock
 func ProcessItemsFix(items []int, processor func(int) int) []int {
-	// YOUR CODE HERE
-	return nil
+	results := make(chan int, len(items)) // Fixed buffer
+	var wg sync.WaitGroup
+
+	for _, item := range items {
+		wg.Go(func() {
+			results <- processor(item)
+		})
+	}
+
+	// Wait for all processing to complete, then collect results
+	wg.Wait()
+	close(results)
+
+	var output []int
+	for r := range results {
+		output = append(output, r)
+	}
+	return output
 }
 
 // Ensure sync import is used

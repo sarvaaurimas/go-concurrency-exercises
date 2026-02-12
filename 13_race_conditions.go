@@ -1,5 +1,12 @@
 package concurrency
 
+import (
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
 // =============================================================================
 // EXERCISE 4.1: Race Condition Detection
 // =============================================================================
@@ -44,9 +51,16 @@ func RaceCounter() int {
 // - sync.Mutex
 // - sync/atomic
 // - Channel to serialize updates
-func RaceCounterFix() int {
-	// YOUR CODE HERE
-	return 0
+func RaceCounterFix() *atomic.Int64 {
+	var counter atomic.Int64
+	for range 1000 {
+		go func() {
+			counter.Add(1) // RACE: concurrent read-modify-write
+		}()
+	}
+	// Wait a bit for goroutines (bad practice, just for demo)
+	time.Sleep(100 * time.Millisecond)
+	return &counter
 }
 
 // RaceSlice has a race condition.
@@ -58,7 +72,8 @@ func RaceSlice() []int {
 			results = append(results, n) // RACE: slice header + backing array
 		}(i)
 	}
-	// time.Sleep(100 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println(results)
 	return results
 }
 
@@ -66,8 +81,19 @@ func RaceSlice() []int {
 //
 // TODO: Fix the race (hint: mutex around append, or use channel)
 func RaceSliceFix() []int {
-	// YOUR CODE HERE
-	return nil
+	var results []int
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i := range 100 {
+		wg.Go(func() {
+			mu.Lock()
+			results = append(results, i) // RACE: slice header + backing array
+			mu.Unlock()
+		},
+		)
+	}
+	wg.Wait()
+	return results
 }
 
 // RaceMap has a race condition.
@@ -142,10 +168,10 @@ func (c *SafeCounter) Value() int {
 // RaceLoopVar demonstrates the classic loop variable capture bug.
 //
 // IMPORTANT GO VERSION NOTE:
-// - Go 1.21 and earlier: Loop variable 'i' is shared across iterations.
-//   All goroutines capture the SAME variable, usually seeing the final value (5).
-// - Go 1.22+: Each iteration creates a NEW loop variable.
-//   This bug is now FIXED at the language level for for-range loops!
+//   - Go 1.21 and earlier: Loop variable 'i' is shared across iterations.
+//     All goroutines capture the SAME variable, usually seeing the final value (5).
+//   - Go 1.22+: Each iteration creates a NEW loop variable.
+//     This bug is now FIXED at the language level for for-range loops!
 //
 // This exercise still demonstrates the concept, but if you're using Go 1.22+,
 // you may not see the bug. The fix patterns shown below are still useful for
@@ -230,9 +256,9 @@ func (s *SafeStats) Snapshot() Stats {
 //
 // TODO: Find ALL race conditions and fix them
 type RacyCache struct {
-	data    map[string]string
-	hits    int
-	misses  int
+	data   map[string]string
+	hits   int
+	misses int
 }
 
 func NewRacyCache() *RacyCache {
@@ -261,10 +287,34 @@ func (c *RacyCache) Stats() (hits, misses int) {
 //
 // TODO: Implement without any race conditions
 type SafeCache struct {
-	// YOUR FIELDS HERE
+	mu     sync.Mutex
+	data   map[string]string
+	hits   atomic.Int64
+	misses atomic.Int64
 }
 
-// func NewSafeCache() *SafeCache {
-// 	// YOUR CODE HERE
-// 	return nil
-// }
+func NewSafeCache() *SafeCache {
+	return &SafeCache{data: make(map[string]string)}
+}
+
+func (c *SafeCache) Get(key string) (string, bool) {
+	c.mu.Lock()
+	val, ok := c.data[key]
+	c.mu.Unlock()
+	if ok {
+		c.hits.Add(1)
+	} else {
+		c.misses.Add(1)
+	}
+	return val, ok
+}
+
+func (c *SafeCache) Set(key, value string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data[key] = value
+}
+
+func (c *SafeCache) Stats() (hits, misses int) {
+	return int(c.hits.Load()), int(c.misses.Load())
+}

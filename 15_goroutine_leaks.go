@@ -35,7 +35,8 @@ func CountGoroutines() int {
 // LeakyFunction creates goroutines that never exit.
 // QUESTION: Why don't these goroutines terminate?
 func LeakyFunction() {
-	ch := make(chan int)
+	// These exit even with a unbuff channel just takes time for them to be scheduled as it needs to be scheduled as a pair, better use a 1 buff channel in case just 1 gets scheduled
+	ch := make(chan int, 1)
 
 	go func() {
 		val := <-ch // LEAK: blocks forever, no sender
@@ -45,7 +46,6 @@ func LeakyFunction() {
 	go func() {
 		ch <- 42 // LEAK: blocks forever, no receiver
 	}()
-
 	// Function returns, but goroutines are stuck
 }
 
@@ -257,7 +257,7 @@ func LeakyPipeline(input []int) []int {
 		for _, v := range input {
 			gen <- v
 		}
-		// LEAK 1: forgot to close(gen)
+		close(gen)
 	}()
 
 	// Stage 2: Transform
@@ -266,16 +266,14 @@ func LeakyPipeline(input []int) []int {
 		for v := range gen {
 			transform <- v * 2
 		}
-		// LEAK 2: forgot to close(transform)
+		close(transform)
 	}()
 
 	// Stage 3: Collect first N
 	var results []int
-	for i := 0; i < 3; i++ { // Only take 3 values
-		results = append(results, <-transform)
+	for val := range transform { // Only take 3 values
+		results = append(results, val)
 	}
-	// LEAK 3: remaining pipeline stages blocked
-
 	return results
 }
 
@@ -288,6 +286,8 @@ func SafePipeline(ctx context.Context, input []int, maxResults int) []int {
 }
 
 // Ensure imports are used
-var _ = context.Background
-var _ = runtime.NumGoroutine
-var _ = time.Second
+var (
+	_ = context.Background
+	_ = runtime.NumGoroutine
+	_ = time.Second
+)
