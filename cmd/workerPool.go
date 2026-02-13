@@ -1,180 +1,148 @@
 package main
 
 import (
-	"errors"
+	"fmt"
 	"log"
 	"sync"
-	"time"
 )
 
-// Job represents a unit of work.
-type Job struct {
-	ID      int
-	Payload int
+type call struct {
+	wg    sync.WaitGroup
+	val   any
+	err   error
+	nDups int
 }
 
-// Result represents the output of processing a job.
-type JobResult struct {
-	JobID  int
-	Output int
-	Err    error
-}
-
-// =============================================================================
-// PART 3: Dynamic Worker Pool
-// =============================================================================
-
-// DynamicPool adjusts worker count based on load.
-//
-// TODO: Implement a pool that:
-// - Starts with minWorkers
-// - Scales up to maxWorkers when jobs are queued
-// - Scales down when idle for a period
-//
-// HINT: This is quite advanced! Consider:
-// - How to detect load (queue depth)
-// - How to spawn new workers safely
-// - How to signal workers to exit
-type DynamicPool struct {
-	mu      sync.RWMutex
-	jobs    chan Job
-	results chan JobResult
-	stopped bool
-	wg      sync.WaitGroup
-	once    sync.Once
-	process func(Job) JobResult
-
-	doneChans  []chan struct{}
-	actW       int
-	minW       int
-	maxW       int
-	maxCapPerc float64
-}
-
-func NewDynamicPool(minW, maxW, queuesize int, process func(Job) JobResult) *DynamicPool {
-	wp := &DynamicPool{
-		minW:       minW,
-		maxW:       maxW,
-		jobs:       make(chan Job, queuesize),
-		results:    make(chan JobResult, queuesize),
-		maxCapPerc: 0.8,
-		process:    process,
-	}
-	for range minW {
-		wp.NewWorker()
-	}
-
-	go func() {
-		wp.Manage()
-	}()
-
-	return wp
-}
-
-func (wp *DynamicPool) NewWorker() {
-	wp.actW++
-	done := make(chan struct{}, 1)
-	wp.doneChans = append(wp.doneChans, done)
-	wp.wg.Go(func() {
-		for {
-			select {
-			case job, ok := <-wp.jobs:
-				if !ok {
-					return
-				}
-				wp.results <- wp.process(job)
-
-			// Shutdown if signalled
-			case <-done:
-				log.Println("Received shutdown signal")
-				return
-			}
-		}
-	})
-}
-
-func (wp *DynamicPool) StopWorker() {
-	wp.actW--
-	done := wp.doneChans[0]
-	wp.doneChans = wp.doneChans[1:]
-	done <- struct{}{}
-}
-
-// Manages workers and spins up and down dynamically
-func (wp *DynamicPool) Manage() {
-	for !wp.IsStopped() {
-		// Spin up a new one if queue reached x%
-		queueCurrCapPerc := wp.QueueLenCapPerc()
-		log.Printf("Current cap - %.2f", queueCurrCapPerc)
-		if queueCurrCapPerc > wp.maxCapPerc && wp.actW < wp.maxW {
-			log.Printf("Cap reached %.2f, actW - %d, maxW - %d, spinning a new one", queueCurrCapPerc, wp.actW, wp.maxW)
-			wp.NewWorker()
-		}
-
-		// Spin down one
-		if queueCurrCapPerc == 0.0 && wp.actW > wp.minW {
-			log.Printf("Queue 0, actW - %d, minW - %d,spinning down", wp.actW, wp.minW)
-			wp.StopWorker()
-		}
-
-		time.Sleep(1 * time.Second)
-	}
-}
-
-// Submit sends a job to the pool.
-// Returns err if pool is shut or queue is full - drop msgs
-func (wp *DynamicPool) Submit(job Job) error {
-	wp.mu.Lock()
-	defer wp.mu.Unlock()
-	if wp.stopped {
-		return errors.New("Worker pool shut down")
-	}
-	select {
-	case wp.jobs <- job:
-		return nil
-	default:
-		return errors.New("buffer queue full")
-	}
-}
-
-// Results returns the channel to receive results from.
-func (wp *DynamicPool) Results() <-chan JobResult {
-	return wp.results
-}
-
-// Results returns the channel to receive results from.
-func (wp *DynamicPool) IsStopped() bool {
-	wp.mu.RLock()
-	defer wp.mu.RUnlock()
-	return wp.stopped
-}
-
-// Returns what perc of total capacity is filled in the queue
-func (wp *DynamicPool) QueueLenCapPerc() float64 {
-	wp.mu.RLock()
-	defer wp.mu.RUnlock()
-	return float64(len(wp.jobs)) / float64(cap(wp.jobs))
-}
-
-// Shutdown gracefully stops the pool.
-// Waits for all in-flight jobs to complete.
+// SingleFlight deduplicates function calls.
 //
 // TODO: Implement to:
-// 1. Close the jobs channel (no more submissions)
-// 2. Wait for all workers to finish
-// 3. Close the results channel
-func (wp *DynamicPool) Shutdown() {
-	wp.once.Do(func() {
-		// Signal shutdown start
-		wp.mu.Lock()
-		wp.stopped = true
-		// Close jobs to finish workers
-		close(wp.jobs)
-		wp.mu.Unlock()
-		// Wait for workers to finish
-		wp.wg.Wait()
-		// Signal end
-		close(wp.results)
-	},
-	)
+// 1. Do(key, fn) executes fn only once per key at a time
+// 2. Concurrent calls with same key wait for first to complete
+// 3. All callers get the same result
+// 4. After completion, new calls start fresh
+type SingleFlight struct {
+	mu    sync.Mutex
+	calls map[string]*call
+}
+
+func NewSingleFlight() *SingleFlight {
+	// YOUR CODE HERE
+	return &SingleFlight{
+		calls: map[string]*call{},
+	}
+}
+
+// Do executes fn only if no other execution for key is in-flight.
+// Returns (result, error, shared) where shared=true if result was shared.
+func (sf *SingleFlight) Do(key string, fn func() (any, error)) (val any, err error, shared bool) {
+	sf.mu.Lock()
+
+	if c, inFlight := sf.calls[key]; inFlight {
+		// if already in Flight
+		c.nDups++
+		sf.mu.Unlock()
+		// Wait for it to complete
+		c.wg.Wait()
+		return c.val, c.err, true
+
+	}
+	// first initialise the wg for others to wait and indicate that we're going to call
+	log.Println("Starting")
+	c := &call{}
+	c.wg.Add(1)
+	sf.calls[key] = c
+	sf.mu.Unlock()
+
+	// Cleanup
+	defer func() {
+		sf.mu.Lock()
+		shared = c.nDups > 0
+		c.wg.Done()
+		delete(sf.calls, key)
+		sf.mu.Unlock()
+	}()
+
+	// Do the call itself, all others can see its being done as key is set
+	// What if this panics?
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("Panicked due to - %+v\n", r)
+				c.err = fmt.Errorf("Panicked due to - %+v", r)
+			}
+		}()
+		c.val, c.err = fn()
+	}()
+	return c.val, c.err, shared
+}
+
+// Forget removes key from the group, allowing a new call to start.
+func (sf *SingleFlight) Forget(key string) {
+	sf.mu.Lock()
+	defer sf.mu.Unlock()
+	delete(sf.calls, key)
+}
+
+// This use sync cond but is slower and not scalable as we lock the whole map to check if its done
+type SingleFlightCond struct {
+	mu    sync.Mutex
+	calls map[string]*callCond
+}
+
+type callCond struct {
+	done  bool
+	cond  *sync.Cond
+	val   any
+	err   error
+	nDups int
+}
+
+func NewSingleFlightCond() *SingleFlightCond {
+	// YOUR CODE HERE
+	return &SingleFlightCond{
+		calls: map[string]*callCond{},
+	}
+}
+
+func (sf *SingleFlightCond) DoSyncCond(key string, fn func() (any, error)) (val any, err error, shared bool) {
+	sf.mu.Lock()
+
+	if c, inFlight := sf.calls[key]; inFlight {
+		// if already in Flight
+		c.nDups++
+		for !c.done {
+			c.cond.Wait()
+		}
+		sf.mu.Unlock()
+
+		return c.val, c.err, true
+
+	}
+	// first initialise the wg for others to wait and indicate that we're going to call
+	c := &callCond{cond: sync.NewCond(&sf.mu)}
+	sf.calls[key] = c
+	sf.mu.Unlock()
+
+	// Cleanup
+	defer func() {
+		sf.mu.Lock()
+		shared = c.nDups > 0
+		delete(sf.calls, key)
+		c.done = true
+		c.cond.Broadcast()
+		sf.mu.Unlock()
+	}()
+
+	// Do the call itself, all others can see its being done as key is set
+	// What if this panics?
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("Panicked due to - %+v\n", r)
+				c.err = fmt.Errorf("Panicked due to - %+v", r)
+			}
+		}()
+		c.val, c.err = fn()
+	}()
+	return c.val, c.err, shared
 }

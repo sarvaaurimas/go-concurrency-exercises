@@ -267,7 +267,6 @@ func RunErrGroupPipeline(ctx context.Context, input <-chan int, stages ...Pipeli
 		output = make(chan int)
 		g.Go(func() error {
 			defer close(output)
-			// Context will make sure all these finish, do we need to close chans?
 			return stage(gCtx, input, output)
 		})
 		input = output
